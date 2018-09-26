@@ -1,24 +1,20 @@
-#include <PubSubClient.h>
-
-
+#include <prometheus_metric.h>
 #include <DallasTemperature.h>
-#include <OneWire.h>
 #include <ESP8266WiFi.h>
-#include <ESP8266Ping.h>
+#include <ESP8266WebServer.h>
 
 #define WIFI_SSID "Toolbox"
 #define WIFI_PW "WIFIPASSWORD"
+#define PORT 9578
 
-#define MQTT_HOST "mcp.toolbox"
-#define MQTT_TOPIC_TEMP "tb/kitchen/sensors/fridgeTemperature"
+#define RESOLUTION 12
 
 OneWire oneWire(D2);
-DallasTemperature tempSensor(&oneWire);
+DallasTemperature sensors(&oneWire);
 
-WiFiClient wifiClient;
-PubSubClient mqttClient(wifiClient);
+ESP8266WebServer server(PORT);
 
-
+Metric temp(MetricType::gauge, "ds18b20_temperature", "Temperature in C, range -10 to +85", 4);
 
 void setup(void)
 {
@@ -26,60 +22,55 @@ void setup(void)
   Serial.begin(9600);
 
   // Temp Sensor
-  tempSensor.begin();
+  Serial.println("Initializing sensor");
+  sensors.begin();
+  sensors.setResolution(RESOLUTION);
 
   // WiFi
+  Serial.println("Initializing WiFi");
+  Serial.printf("Connectong to \"%s\"\n", WIFI_SSID);
+  WiFi.mode(WIFI_STA);
+  WiFi.hostname("FRIDGE-ESP");
   WiFi.begin(WIFI_SSID, WIFI_PW);
-
+  Serial.println("");
   while (WiFi.status() != WL_CONNECTED) {
     delay(500);
     Serial.print(".");
   }
   Serial.println("");
-  Serial.println("WiFi connected");
-  Serial.println("IP address: ");
+  Serial.print("Connected to ");
+  Serial.println(WIFI_SSID);
+  Serial.print("IP address: ");
   Serial.println(WiFi.localIP());
 
-  // MQTT
-  mqttClient.setServer(MQTT_HOST, 1883);
+  // Server
+  server.on("/", handleRoot);
+  server.on("/metrics", handleMetrics);
+  server.begin();
+  Serial.printf("HTTP server started on port %d\n", PORT);
 }
 
-
-void loop(void)
+void loop()
 {
-  tempSensor.requestTemperatures();
-  float temperature = tempSensor.getTempCByIndex(0);
+  sensors.setWaitForConversion(false);
+  sensors.requestTemperatures();
 
-  if (!mqttClient.connected()) {
-    reconnect();
+  unsigned long start = millis();
+  while (start + (750 / (1 << (12 - RESOLUTION))) > millis() && millis() >= start) {
+    server.handleClient();
   }
-  char msg[20];
-  dtostrf(temperature, 3, 4, msg);
-  mqttClient.publish(MQTT_TOPIC_TEMP, msg);
-  
-  delay(30000);
+
+  float t = sensors.getTempCByIndex(0);
+  temp.setValue(t);
+  Serial.print("Temperature: ");
+  Serial.println(t);
+  Serial.println("\n\n\n\n");
 }
 
-void reconnect() {
-  // Loop until we're reconnected
-  while (!mqttClient.connected()) {
-    Serial.print("Attempting MQTT connection...");
-    // Create a random client ID
-    String clientId = "ESP8266Client-";
-    clientId += String(random(0xffff), HEX);
-    // Attempt to connect
-    if (mqttClient.connect(clientId.c_str())) {
-      Serial.println("connected");
-      // Once connected, publish an announcement...
-      //mqttClient.publish("outTopic", "hello world");
-      // ... and resubscribe
-      //mqttClient.subscribe("inTopic");
-    } else {
-      Serial.print("failed, rc=");
-      Serial.print(mqttClient.state());
-      Serial.println(" try again in 5 seconds");
-      // Wait 5 seconds before retrying
-      delay(5000);
-    }
-  }
+void handleRoot() {
+  server.send(200, "text/html", "<a href=\"/metrics\">metrics</a>");
+}
+
+void handleMetrics() {
+  server.send(200, "text/plain; version=0.0.4", temp.getString());
 }
